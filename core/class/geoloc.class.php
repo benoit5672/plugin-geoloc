@@ -275,50 +275,73 @@ class geolocCmd extends cmd {
 	/*	 * *************************Attributs****************************** */
 
 	/*	 * ***********************Methode static*************************** */
-	function get_driving_information($start, $finish, $highways = true) {
+	private function get_driving_information_from_cache($from, $to, $highways) {
+		// if from and to are static, we cannot cache the information
+		if ($from->getConfiguration('mode') === 'fixed' && $to->getConfiguration('mode') === 'fixed') {
+			log::add('geoloc', 'debug', 'No cache from fixed to fixed');
+			return null;
+		}
+		$eqLogic = $this->getEqLogic();
+		$key     = $from->getId() . '_' . $to->getId() . '_' . (int) $highways;
+		$last    = $eqLogic->getCache($key, array());
+		if (count($last) != 0) {
+        	$current_time = time();
+			$start        = $from->execCmd();
+			$finish       = $to->execCmd();
+        	if (isset($last['lasttime']) and isset($last['time']) and isset($last['distance']) and isset($last['start']) and isset($last['finish'])) {
+           		if ($start == $last['start'] and $finish == $last['finish']) {
+               		log::add('geoloc', 'debug', 'Using cache (same position) for ' . $key . '=> start=' . $start . ', finish=' . $finish);
+			   		return array('distance' => $last['distance'], 'time' => $last['time']);
+           		}
+           		$delta = $current_time - (int) $last['lasttime'];
+		   		$refreshGoogle = $eqLogic->getGoogleRequestInterval();
+          		// BR>> we refresh every hour during our test
+           		if ($delta < $refreshGoogle) {
+               		log::add('geoloc', 'debug', 'Using cache for ' . $key . '(less than ' . $refreshGoogle . ': current_time=' . $current_time . ', lasttime=' . $last['lasttime'] . ', delta=' . $delta);
+			   		return array('distance' => $last['distance'], 'time' => $last['time']);
+           		}
+           		log::add('geoloc', 'debug', 'cached data are to old for ' . $key . '=> ('. $delta . '/' . $refreshGoogle . ')');
+			}
+        }
+		// no value, of value to old
+		return null;
+	}
+
+	private function set_driving_information_to_cache($from, $to, $highways, $time, $distance) {
+		$eqLogic      = $this->getEqLogic();
+		$key          = $from->getId() . '_' . $to->getId() . '_' . (int) $highways;
+		$current_time = time();
+
+		$value        = array('lasttime' => $current_time, 'distance' => $distance, 'time' => $time, 'start' => $from->execCmd(), 'finish' => $to->execCmd());
+		log::add('geoloc', 'debug', 'set cache for ' . $key . '=>' . print_r($value, true));
+			$eqLogic->setCache($key, $value);
+	}
+
+	private function get_driving_information($from, $to, $highways = true) {
+		$start  = $from->execCmd();
+		$finish = $to->execCmd();
+
 		if (strcmp($start, $finish) == 0) {
 			return array('distance' => 0, 'time' => 0);
 		}
-        // BR>> begin
-        $eqLogic      = $this->getEqLogic();
-        $current_time = time();
-        $last     = array('lasttime' => $eqLogic->getCache('lasttime'),
-                          'time'     => $eqLogic->getCache('time'),
-                          'distance' => $eqLogic->getCache('distance'),
-                          'start'    => $eqLogic->getCache('start'),
-                          'finish'   => $eqLogic->getCache('finish'));
-        //  array('lasttime', 'time', 'distance', 'start', 'finish'));
-        //log::add('geoloc', 'debug', 'BR>> cached data (input)' . print_r($last, true));
-        if (isset($last['lasttime']) and isset($last['time']) and isset($last['distance']) and isset($last['start']) and isset($last['finish'])) {
-           if ($start == $last['start'] and $finish == $last['finish']) {
-               log::add('geoloc', 'debug', 'Using cache (same position): start=' . $start . ', finish=' . $finish);
-			   return array('distance' => $last['distance'], 'time' => $last['time']);
-           }
-           $delta = $current_time - (int) $last['lasttime'];
-		   $refreshGoogle = $eqLogic->getGoogleRequestInterval();
-          // BR>> we refresh every hour during our test
-           if ($delta < $refreshGoogle) {
-               log::add('geoloc', 'debug', 'Using cache (less than ' . $refreshGoogle . ': current_time=' . $current_time . ', lasttime=' . $last['lasttime'] . ', delta=' . $delta);
-			   return array('distance' => $last['distance'], 'time' => $last['time']);
-           }
-           log::add('geoloc', 'debug', 'cached data are to old ('. $delta . '). Processed with google maps query...');
-        }
-        // BR>> end
-		$start = urlencode($start);
-		$finish = urlencode($finish);
-		$distance = __('Inconnue', __FILE__);
-		$time = __('Inconnue', __FILE__);
-		$url = 'https://maps.googleapis.com/maps/api/directions/xml?origin=' . $start . '&destination=' . $finish . '&sensor=false&key=' . trim(config::byKey('apikey', 'geoloc'));;
-		if (!$highways) {
-			$url .= '&avoid=highways';
+
+		// Check if we already have the information in the cache for this from -> to
+		$cached = $this->get_driving_information_from_cache($from, $to, $highways);
+		if ($cached != null) {
+			return $cached;
 		}
-		log::add('geoloc', 'debug', 'google URL:' . $url);
-		// if we have send (the plugin) a request to google in the last second, wait
-        //$last_exec = time();
-        //if ($current_time - $last_exec <= 1) {
-        //  sleep(1);
-        //}
+
+        // We need to refresh, if we are under plugin quota
 		if (geoloc::isGoogleRequestUnderQuota() === true) {
+			$start    = urlencode($start);
+			$finish   = urlencode($finish);
+			$distance = __('Inconnue', __FILE__);
+			$time     = __('Inconnue', __FILE__);
+			$url      = 'https://maps.googleapis.com/maps/api/directions/xml?origin=' . $start . '&destination=' . $finish . '&sensor=false&key=' . trim(config::byKey('apikey', 'geoloc'));;
+			if (!$highways) {
+				$url .= '&avoid=highways';
+			}
+			log::add('geoloc', 'debug', 'google URL:' . $url);
 			if ($data = file_get_contents($url)) {
 				geoloc::addGoogleRequestQuota();
             	log::add('geoloc', 'debug', 'data:' . $data);
@@ -332,13 +355,10 @@ class geolocCmd extends cmd {
 					log::add('geoloc', 'debug', 'Impossible de trouver une route ' . $data);
 					throw new Exception(__('Impossible de trouver une route', __FILE__));
 				}
-				// BR>> begin
-            	$last = array('lasttime' => $current_time, 'distance' => $distance, 'time' => $time, 'start' => urldecode($start), 'finish' => urldecode($finish));
-            	//log::add('geoloc', 'debug', 'BR>> cached data (output)' . print_r($last, true));
-            	foreach ($last as $k => $v) {
-            		$eqLogic->setCache($k, $v);
-            	}
-				// BR>> end
+
+				// Store the information in cache
+				$this->set_driving_information_to_cache($from, $to, $highways, $time, $distance);
+
 				log::add('geoloc', 'debug', 'distance=' . $distance . ', time=' . $time);
 				return array('distance' => $distance, 'time' => $time);
 			} else {
@@ -421,11 +441,6 @@ class geolocCmd extends cmd {
 	}
 
 	public function execute($_options = array()) {
-		//if($this->getType()=="action"){
-        //  	log::add('geoloc', 'debug', 'BR>> cmd->execute(action) / ' . $this->getHumanName());
-		//	$geoloc=$this->getEqLogic();
-		//	$geoloc->cron5($geoloc->getId());
-		//}
 		switch ($this->getConfiguration('mode')) {
 			case 'fixe':
 				$result = $this->getConfiguration('coordinate');
@@ -461,7 +476,7 @@ class geolocCmd extends cmd {
 					if ($this->getConfiguration('noHighways', 0) == 1) {
 						$highways = false;
 					}
-					$result = self::get_driving_information($from->execCmd(), $to->execCmd(), $highways);
+					$result = $this->get_driving_information($from, $to, $highways);
 					return $result['time'];
 				} catch (Exception $e) {
 					return 0;
@@ -475,38 +490,18 @@ class geolocCmd extends cmd {
 					if ($this->getConfiguration('noHighways', 0) == 1) {
 						$highways = false;
 					}
-					$result = self::get_driving_information($from->execCmd(), $to->execCmd(), $highways);
+					$result = $this->get_driving_information($from, $to, $highways);
 					return $result['distance'];
 				} catch (Exception $e) {
 					return 0;
 				}
 		}
-		//Mise à jour sur refresh pour actualisation des données de trajet (pas de cron car tarification Google)
-		$eqlogic = $this->getEqLogic();
-		$eqlogic_id = $this->getEqLogic_id();
+		//Mise à jour sur refresh pour actualisation des données de trajet
 		switch ($this->getLogicalId()) {
 			case 'refresh':
-			/*
-				foreach (cmd::byEqLogicId($eqlogic_id) as $cmd) {
-					$cmd_id = $cmd->getId();
-					if ($cmd->getConfiguration('mode') == 'travelTime' || $cmd->getConfiguration('mode') == 'travelDistance') {
-						$from = cmd::byId($cmd->getConfiguration('from'));
-						$to = cmd::byId($cmd->getConfiguration('to'));
-						try {
-							$highways = true;
-							if ($this->getConfiguration('noHighways', 0) == 1) {
-								$highways = false;
-							}
-							$result = self::get_driving_information($from->execCmd(), $to->execCmd(), $highways);
-							if ($cmd->getConfiguration('mode') == 'travelTime') {cmd::byId($cmd_id)->event($result['time']);}
-							else if ($cmd->getConfiguration('mode') == 'travelDistance') {cmd::byId($cmd_id)->event($result['distance']);}
-						} catch (Exception $e) {
-							return 0;
-						}
-					}
-				}
-			*/
-			break;
+				//$geoloc =$this->getEqLogic();
+				//$geoloc->cron5($geoloc->getId());
+				break;
 		}
 	}
 
