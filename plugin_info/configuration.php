@@ -27,9 +27,15 @@ if (!isConnect()) {
 <form class="form-horizontal">
 	<fieldset>
 		<div class="form-group">
-			<label class="col-sm-3 control-label">{{Clé API Google "Directions API"}}</label>
+			<label class="col-sm-4 control-label">{{Clé API Google "Directions API"}}</label>
 			<div class="col-xs-11 col-sm-7">
 				<input class="configKey form-control" data-l1key="apikey" />
+			</div>
+		</div>
+		<div class="form-group">
+			<label class="col-sm-4 control-label">{{Nombre maximum de requêtes par jour (0 pour illimités)"}}</label>
+			<div class="col-xs-11 col-sm-7">
+				<input class="configKey form-control" data-l1key="maxRequestPerDay" placeholder="1000"/>
 			</div>
 		</div>
 	</fieldset>

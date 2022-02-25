@@ -22,6 +22,8 @@ if (!class_exists('FindMyiPhone')) {
 	require_once dirname(__FILE__) . '/../../3rdparty/class.findmyiphone.php';
 }
 
+
+
 class geoloc extends eqLogic {
 	/*	 * *************************Attributs****************************** */
 	/* 200$ free credit each month, Direction API = 5$ for 1000 request
@@ -104,12 +106,22 @@ class geoloc extends eqLogic {
 	// we also have a per eqLogic indicator to know if you should use cron
 	// to refresh data automatically
     // 'dayUsage', 'dayLimit'
+
+	private static function maxGoogleRequestPerDay() {
+		$max = config::byKey('maxRequestPerDay', 'geoloc');
+		if ($max === '' || !is_numeric($max)) {
+			$max = self::MAX_GOOGLE_REQUEST_PER_DAY;
+		}
+		return $max;
+	}
+
     public static function isGoogleRequestUnderQuota() {
         $plugin = plugin::byId(__CLASS__);
 		$cache  = cache::byKey('eqLogicCacheAttr' . $plugin->getId())->getValue();
 		$value  = utils::getJsonAttr($cache, 'googleRequest', 0);
-		log::add('geoloc', 'debug', 'isGoogleRequestUnderQuota --> req/quota=' . ($value) . '/' . self::MAX_GOOGLE_REQUEST_PER_DAY);
-		return ($value <= self::MAX_GOOGLE_REQUEST_PER_DAY);
+		$max    = self::maxGoogleRequestPerDay();
+		log::add('geoloc', 'debug', 'isGoogleRequestUnderQuota --> req/quota=' . ($value) . '/' . $max);
+		return ($max == 0) ? true : ($value <= $max);
 	}
 
     public static function addGoogleRequestQuota() {
@@ -124,7 +136,7 @@ class geoloc extends eqLogic {
 		$plugin = plugin::byId(__CLASS__);
 		$cache  = cache::byKey('eqLogicCacheAttr' . $plugin->getId())->getValue();
 		$value  = utils::getJsonAttr($cache, 'googleRequest', 0);
-		log::add('geoloc', 'info', 'number of google requests done yesterday: ' . $value . ', quota=' . self::MAX_GOOGLE_REQUEST_PER_DAY);
+		log::add('geoloc', 'info', 'number of google requests done yesterday: ' . $value . ', quota=' . self::maxGoogleRequestPerDay());
         cache::set('eqLogicCacheAttr' . $plugin->getId(),
             		utils::setJsonAttr($cache, 'googleRequest', 0));
     }
@@ -256,6 +268,22 @@ class geoloc extends eqLogic {
 		return $geoloc;
 	}
 
+	public function preInsert() {
+        $this->setConfiguration('cronRefresh', 1);
+        $this->setConfiguration('refreshInterval', 300);
+	}
+
+	//
+    public function preSave() {
+		$cronRefresh = $this->getConfiguration('cronRefresh', 1);
+
+		// refreshInterval [60..3600]
+        $refreshInterval = $this->getConfiguration('refreshInterval', 300);
+        if ($cronRefresh == 1 && ($refreshInterval === '' || !is_numeric($refreshInterval) || $refreshInterval < 60 || $refreshInterval > 3600)) {
+            throw new Exception(__('Merci de specifier combien de temps les informations reçues de Google sont considérées comme valide.',__FILE__));
+        }
+    }
+
 	 public function postSave() {
 		$refreshCmd = $this->getCmd(null, 'refresh');
 		if (!is_object($refreshCmd)) {
@@ -268,6 +296,30 @@ class geoloc extends eqLogic {
 		$refreshCmd->setType('action');
 		$refreshCmd->setSubType('other');
 		$refreshCmd->save();
+	}
+
+	public function clear_driving_information_from_cache() {
+		log::add('geoloc', 'info', 'clear_driving_information_from_cache / ' . $this->getHumanName());
+		$cmds = $this->getCmd('info');
+		foreach ($cmds as $cmd) {
+			switch ($cmd->getConfiguration('mode')) {
+				case 'travelTime':
+				case 'travelDistance':
+					$from = cmd::byId($cmd->getConfiguration('from'));
+					$to = cmd::byId($cmd->getConfiguration('to'));
+					$highways = true;
+					if ($cmd->getConfiguration('noHighways', 0) == 1) {
+						$highways = false;
+					}
+
+					$key = $from->getId() . '_' . $to->getId() . '_' . (int) $highways;
+					log::add('geoloc', 'debug', 'clear cache for ' . $this->getHumanName() . ' / ' . $key);
+					$this->setCache($key, array());
+					break;
+				default:
+					break;
+			}
+		}
 	}
 }
 
@@ -314,15 +366,21 @@ class geolocCmd extends cmd {
 
 		$value        = array('lasttime' => $current_time, 'distance' => $distance, 'time' => $time, 'start' => $from->execCmd(), 'finish' => $to->execCmd());
 		log::add('geoloc', 'debug', 'set cache for ' . $key . '=>' . print_r($value, true));
-			$eqLogic->setCache($key, $value);
+		$eqLogic->setCache($key, $value);
 	}
 
 	private function get_driving_information($from, $to, $highways = true) {
+
 		$start  = $from->execCmd();
 		$finish = $to->execCmd();
 
 		if (strcmp($start, $finish) == 0) {
 			return array('distance' => 0, 'time' => 0);
+		}
+
+		if ($start == '' || $finish == '') {
+			log::add('geoloc', 'info', 'Il manque l\'origine ou la destination pour ' . $this->getHumanName() . ': ('. $start . '/' . $finish . ')');
+			throw new Exception(__('Il manque l\'origine ou la destination pour ', __FILE__) . $this->getHumanName());
 		}
 
 		// Check if we already have the information in the cache for this from -> to
@@ -337,7 +395,7 @@ class geolocCmd extends cmd {
 			$finish   = urlencode($finish);
 			$distance = __('Inconnue', __FILE__);
 			$time     = __('Inconnue', __FILE__);
-			$url      = 'https://maps.googleapis.com/maps/api/directions/xml?origin=' . $start . '&destination=' . $finish . '&sensor=false&key=' . trim(config::byKey('apikey', 'geoloc'));;
+			$url      = 'https://maps.googleapis.com/maps/api/directions/xml?origin=' . $start . '&destination=' . $finish . '&sensor=false&key=' . trim(config::byKey('apikey', 'geoloc'));
 			if (!$highways) {
 				$url .= '&avoid=highways';
 			}
@@ -346,7 +404,7 @@ class geolocCmd extends cmd {
 				geoloc::addGoogleRequestQuota();
             	log::add('geoloc', 'debug', 'data:' . $data);
 				$xml = new SimpleXMLElement($data);
-				if (isset($xml->route->leg->duration->value) AND (int) $xml->route->leg->duration->value > 0) {
+				if (isset($xml->route->leg->duration->value) AND (int) $xml->route->leg->duration->value >= 0) {
 					$distance = (int) $xml->route->leg->distance->value / 1000;
 					$distance = round($distance, 1);
 					$time = (int) $xml->route->leg->duration->value;
@@ -424,7 +482,6 @@ class geolocCmd extends cmd {
 			return true;
 		}
 		return false;
-
 	}
 
 	function distance($lat1, $lng1, $lat2, $lng2) {
@@ -441,67 +498,77 @@ class geolocCmd extends cmd {
 	}
 
 	public function execute($_options = array()) {
-		switch ($this->getConfiguration('mode')) {
-			case 'fixe':
-				$result = $this->getConfiguration('coordinate');
-				return $result;
-			case 'distance':
-			  	log::add('geoloc', 'debug', 'BR>> cmd->execute(distance) / ' . $this->getHumanName());
-				$from = cmd::byId($this->getConfiguration('from'));
-				$to = cmd::byId($this->getConfiguration('to'));
-				if (!is_object($from)) {
-					throw new Exception(__('Commande point de départ introuvable : ', __FILE__) . $this->getConfiguration('from'));
-				}
-				if (!is_object($to)) {
-					throw new Exception(__('Commande point d\'arrivé introuvable : ', __FILE__) . $this->getConfiguration('to'));
-				}
-				$to = explode(',', $to->execCmd());
-				$from = explode(',', $from->execCmd());
-				if (count($to) > 2) {
-					$to[2] = implode(',', array_slice($to, 1));
-				}
-				if (count($from) > 2) {
-					$from[2] = implode(',', array_slice($from, 1));
-				}
-				if (count($to) == 2 && count($from) == 2) {
-					return self::distance($from[0], $from[1], $to[0], $to[1]);
-				}
-				return 0;
-			case 'travelTime':
-				log::add('geoloc', 'debug', 'BR>> cmd->execute(travelTime) / ' . $this->getHumanName());
-				$from = cmd::byId($this->getConfiguration('from'));
-				$to = cmd::byId($this->getConfiguration('to'));
-				try {
-					$highways = true;
-					if ($this->getConfiguration('noHighways', 0) == 1) {
-						$highways = false;
-					}
-					$result = $this->get_driving_information($from, $to, $highways);
-					return $result['time'];
-				} catch (Exception $e) {
-					return 0;
-				}
-			case 'travelDistance':
-				log::add('geoloc', 'debug', 'BR>> cmd->execute(travelDistance) / ' . $this->getHumanName());
-				$from = cmd::byId($this->getConfiguration('from'));
-				$to = cmd::byId($this->getConfiguration('to'));
-				try {
-					$highways = true;
-					if ($this->getConfiguration('noHighways', 0) == 1) {
-						$highways = false;
-					}
-					$result = $this->get_driving_information($from, $to, $highways);
-					return $result['distance'];
-				} catch (Exception $e) {
-					return 0;
-				}
-		}
 		//Mise à jour sur refresh pour actualisation des données de trajet
 		switch ($this->getLogicalId()) {
 			case 'refresh':
-				//$geoloc =$this->getEqLogic();
-				//$geoloc->cron5($geoloc->getId());
+				log::add('geoloc', 'debug', 'BR>> cmd->execute(refresh) / ' . $this->getHumanName() . ' options=' . count($_options));
+				if (count($_options) > 0) {
+					// this is an "ondemand" refresh (options[0] = user, options[1] = 1)
+					$geoloc = $this->getEqLogic();
+					$geoloc->clear_driving_information_from_cache();
+					$geoloc->cron5($geoloc->getId());
+				}
+				// otherwise, nothing special to do
 				break;
+			default:
+				switch ($this->getConfiguration('mode')) {
+					case 'fixe':
+						$result = $this->getConfiguration('coordinate');
+						return $result;
+					case 'distance':
+						log::add('geoloc', 'debug', 'BR>> cmd->execute(distance) / ' . $this->getHumanName());
+						$from = cmd::byId($this->getConfiguration('from'));
+						$to = cmd::byId($this->getConfiguration('to'));
+						if (!is_object($from)) {
+							throw new Exception(__('Commande point de départ introuvable : ', __FILE__) . $this->getConfiguration('from'));
+						}
+						if (!is_object($to)) {
+							throw new Exception(__('Commande point d\'arrivé introuvable : ', __FILE__) . $this->getConfiguration('to'));
+						}
+						$to = explode(',', $to->execCmd());
+						$from = explode(',', $from->execCmd());
+						if (count($to) > 2) {
+							$to[2] = implode(',', array_slice($to, 1));
+						}
+						if (count($from) > 2) {
+							$from[2] = implode(',', array_slice($from, 1));
+						}
+						if (count($to) == 2 && count($from) == 2) {
+							return self::distance($from[0], $from[1], $to[0], $to[1]);
+						}
+						return 0;
+					case 'travelTime':
+						log::add('geoloc', 'debug', 'BR>> cmd->execute(travelTime) / ' . $this->getHumanName());
+						$from = cmd::byId($this->getConfiguration('from'));
+						$to = cmd::byId($this->getConfiguration('to'));
+						try {
+							$highways = true;
+							if ($this->getConfiguration('noHighways', 0) == 1) {
+								$highways = false;
+							}
+							$result = $this->get_driving_information($from, $to, $highways);
+							return $result['time'];
+						} catch (Exception $e) {
+							return 0;
+						}
+					case 'travelDistance':
+						log::add('geoloc', 'debug', 'BR>> cmd->execute(travelDistance) / ' . $this->getHumanName());
+						$from = cmd::byId($this->getConfiguration('from'));
+						$to = cmd::byId($this->getConfiguration('to'));
+						try {
+							$highways = true;
+							if ($this->getConfiguration('noHighways', 0) == 1) {
+								$highways = false;
+							}
+							$result = $this->get_driving_information($from, $to, $highways);
+							return $result['distance'];
+						} catch (Exception $e) {
+							return 0;
+						}
+					default:
+						log::add('geoloc', 'debug', 'Unexpected mode ' . $this->getConfiguration('mode') . ' for ' . $this->getHumanName());
+						return 0;
+				}
 		}
 	}
 

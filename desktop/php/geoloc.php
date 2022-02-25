@@ -149,6 +149,21 @@ $eqLogics = eqLogic::byType($plugin->getId());
                     <input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="noSpecifyWidget" />
                     </div>
                 </div>
+				<!-- benoit5672 -->
+				<br/>
+				<legend><i class="fas fa-cogs"></i> {{Paramétrage pour le rafraîchissement automatique toutes les 5 minutes}}</legend>
+ 				<div class="form-group">
+					<label class="col-sm-3 control-label">{{Automatique (cron)}}</label>
+					<div class="col-xs-11 col-sm-7">
+						<input type="checkbox" class="eqLogicAttr" data-l1key="configuration" data-l2key="cronRefresh" checked/>
+					</div>
+				</div>
+				<div class="form-group">
+					<label class="col-sm-3 control-label">{{Validité du cache}}</label>
+					<div class="col-xs-11 col-sm-7">
+						<input type="text" class="eqLogicAttr" data-l1key="configuration" data-l2key="refreshInterval" placeholder="300"/>
+					</div>
+				</div>
             </fieldset>
         </form>
     </div>
